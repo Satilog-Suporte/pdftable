@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Extrair Temperatura & Umidade → Colar no Word</title>
+
+<!-- pdf.js (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.12.313/pdf.min.js"></script>
+
+<style>
+  :root{
+    --bg:#f6f8fb; --card:#fff; --accent:#0b63d1; --muted:#666;
+  }
+  *{box-sizing:border-box}
+  body{font-family:Inter,system-ui,Arial,sans-serif;margin:0;background:var(--bg);color:#222}
+  .wrap{max-width:980px;margin:28px auto;padding:18px}
+  header{display:flex;align-items:center;gap:16px}
+  h1{margin:0;font-size:20px}
+  p.lead{margin:0;color:var(--muted);font-size:13px}
+
+  .uploader{
+    margin-top:18px;background:var(--card);border-radius:12px;padding:18px;border:1px dashed #d0d7e6;
+    display:flex;flex-direction:column;align-items:center;gap:12px;
+  }
+  .drop{
+    width:100%;max-width:640px;padding:18px;border-radius:8px;text-align:center;
+    background:linear-gradient(180deg,#fff,#fbfdff);
+    cursor:pointer;border:2px dashed #e1e7f7;
+  }
+  .drop.dragover{border-color:var(--accent);box-shadow:0 6px 20px rgba(11,99,209,0.08)}
+  .small{font-size:13px;color:var(--muted)}
+
+  .controls{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.secondary{background:#333;color:#fff}
+  button:disabled{opacity:.5;cursor:not-allowed}
+
+  .status{margin-top:12px;font-size:13px;color:var(--muted)}
+
+  .table-wrap{margin-top:18px;background:var(--card);padding:12px;border-radius:10px;border:1px solid #e9eef8}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:6px 8px;border:1px solid #eef3fb;text-align:center}
+  th{background:#f0f6ff;color:#0b63d1;font-weight:600}
+  tr:nth-child(even){background:#fbfdff}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  @media (max-width:600px){
+    th,td{font-size:12px;padding:6px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Extrair Temperatura & Umidade</h1>
+      <p class="lead">Abra o PDF e copie direto para o Word sem bagunça (usa TSV ao copiar).</p>
+    </div>
+  </header>
+
+  <div class="uploader">
+    <label class="drop" id="drop">
+      <input id="fileinput" type="file" accept="application/pdf" style="display:none">
+      <div style="font-weight:600">Clique ou arraste o PDF aqui</div>
+      <div class="small">O app extrai linhas com: <em>dd/mm/yyyy, hh:mm:ss &nbsp; °C &nbsp; %RH</em></div>
+    </label>
+
+    <div class="controls">
+      <button id="btnProcess" disabled>Processar</button>
+      <button id="btnClear" class="secondary" disabled>Limpar</button>
+    </div>
+
+    <div class="status" id="status">Nenhum arquivo carregado.</div>
+    <div class="hint">Dica: use "Copiar p/ Word" e cole direto no documento (Ctrl+V). Se preferir editar no Excel, use "Baixar CSV".</div>
+  </div>
+
+  <div id="result-area" style="display:none">
+    <div class="table-wrap">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <strong>Pré-visualização da tabela</strong>
+        <div class="actions">
+          <button id="copyWord">📋 Copiar p/ Word</button>
+          <button id="downloadCSV">💾 Baixar CSV</button>
+          <button id="downloadDoc">📄 Baixar .doc (abrir no Word)</button>
+        </div>
+      </div>
+
+      <div style="overflow:auto;max-height:420px;margin-top:12px">
+        <table id="output-table" aria-live="polite">
+          <thead><tr><th>Data</th><th>Hora</th><th>°C</th><th>%RH</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ------- Helpers -------
+  const el = id => document.getElementById(id);
+  const drop = document.getElementById('drop');
+  const fileinput = document.getElementById('fileinput');
+  const btnProcess = document.getElementById('btnProcess');
+  const btnClear = document.getElementById('btnClear');
+  const status = document.getElementById('status');
+  const resultArea = document.getElementById('result-area');
+  const tbody = document.querySelector('#output-table tbody');
+  const copyWord = document.getElementById('copyWord');
+  const downloadCSV = document.getElementById('downloadCSV');
+  const downloadDoc = document.getElementById('downloadDoc');
+
+  let chosenFile = null;
+  let extractedRows = [];
+
+  // drag & drop UI
+  ['dragenter','dragover'].forEach(evt => {
+    drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.add('dragover'); });
+  });
+  ['dragleave','drop'].forEach(evt => {
+    drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.remove('dragover'); });
+  });
+  drop.addEventListener('drop', e=>{
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(f) handleFile(f);
+  });
+  drop.addEventListener('click', ()=> fileinput.click());
+  fileinput.addEventListener('change', e=>{
+    const f = e.target.files && e.target.files[0];
+    if(f) handleFile(f);
+  });
+
+  function handleFile(file){
+    chosenFile = file;
+    status.textContent = `Arquivo pronto: ${file.name} — tamanho ${(file.size/1024).toFixed(1)} KB`;
+    btnProcess.disabled = false;
+    btnClear.disabled = false;
+    resultArea.style.display = 'none';
+  }
+
+  btnClear.addEventListener('click', ()=>{
+    chosenFile = null; extractedRows = []; tbody.innerHTML=''; resultArea.style.display='none';
+    status.textContent = 'Nenhum arquivo carregado.'; btnProcess.disabled=true; btnClear.disabled=true;
+  });
+
+  // ---------- PDF processing ----------
+  btnProcess.addEventListener('click', async ()=>{
+    if(!chosenFile) return;
+    btnProcess.disabled = true;
+    status.textContent = 'Processando PDF — isto pode levar alguns segundos...';
+    extractedRows = [];
+    tbody.innerHTML = '';
+    resultArea.style.display = 'none';
+
+    try{
+      const arrayBuffer = await chosenFile.arrayBuffer();
+      const typed = new Uint8Array(arrayBuffer);
+
+      // pdf.js getDocument
+      const loadingTask = pdfjsLib.getDocument(typed);
+      const pdf = await loadingTask.promise;
+
+      // read all pages and concatenate text
+      let rawText = '';
+      for(let p=1; p<=pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const textContent = await page.getTextContent();
+        // join with a space so neighbouring tokens separate
+        rawText += textContent.items.map(i=>i.str).join(' ') + '\n';
+      }
+
+      // cleanup duplicates: sometimes pdf.js repeats header/footer texts per page.
+      // Strategy: collapse repeating sequences longer than 20 chars that appear multiple times.
+      rawText = removeSimpleDuplicates(rawText);
+
+      // Now extract rows. Regex aims to capture:
+      // dd/mm/yyyy  , optional comma or whitespace  hh:mm:ss   temp  hum
+      // permissive on spaces and decimal separator (dot or comma)
+      const regex = /(\d{2}\/\d{2}\/\d{4})[, ]*\s*(\d{2}:\d{2}:\d{2})\s+([+-]?\d{1,3}[.,]?\d{0,3})\s+([+-]?\d{1,3}[.,]?\d{0,3})/g;
+
+      let m;
+      while((m = regex.exec(rawText)) !== null){
+        // normalize decimals to use dot
+        const date = m[1];
+        const time = m[2];
+        const temp = m[3].replace(',', '.');
+        const hum = m[4].replace(',', '.');
+
+        // basic validation: reasonable ranges
+        const tnum = parseFloat(temp);
+        const hnum = parseFloat(hum);
+        if(!isNaN(tnum) && !isNaN(hnum)){
+          // Optionally skip impossible humidity values > 100 or < 0
+          // Keep as-is but you can uncomment the check to filter
+          // if(hnum < 0 || hnum > 120) continue;
+          extractedRows.push([date, time, temp, hum]);
+        }
+      }
+
+      if(extractedRows.length === 0){
+        status.textContent = 'Nenhuma linha encontrada com o padrão esperado. Tente outro PDF ou me mande o arquivo.';
+        btnProcess.disabled = false;
+        return;
+      }
+
+      // fill table (limit preview to first 500 rows to keep UI snappy)
+      const PREVIEW_LIMIT = 500;
+      tbody.innerHTML = extractedRows.slice(0, PREVIEW_LIMIT).map(r => 
+        `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`
+      ).join('');
+
+      status.textContent = `Processado: ${extractedRows.length} linhas. (pré-visualizando ${Math.min(extractedRows.length, PREVIEW_LIMIT)})`;
+      resultArea.style.display = 'block';
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Erro ao processar o PDF. Veja o console do navegador para detalhes.';
+    } finally {
+      btnProcess.disabled = false;
+    }
+  });
+
+  // small duplicate-removal heuristic
+  function removeSimpleDuplicates(text){
+    // remove multiple repeated header lines (common when PDF has same header on each page)
+    // find sequences of length >= 20 that appear > 1 time and remove extra occurrences
+    const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+    const freq = {};
+    for(const l of lines){
+      if(l.length < 20) continue;
+      freq[l] = (freq[l]||0) + 1;
+    }
+    const repeated = new Set(Object.keys(freq).filter(k => freq[k] > 1));
+    // build output skipping lines that match repeated headers more than once (keep first)
+    const seen = new Set();
+    const out = [];
+    for(const l of lines){
+      if(repeated.has(l)){
+        if(seen.has(l)) continue;
+        seen.add(l);
+      }
+      out.push(l);
+    }
+    return out.join('\n');
+  }
+
+  // -------- Copy as TSV (best for Word) ----------
+  copyWord.addEventListener('click', async ()=>{
+    if(extractedRows.length === 0) return;
+    // build TSV string
+    const header = ['Data','Hora','°C','%RH'];
+    const lines = [header.join('\t'), ...extractedRows.map(r => r.join('\t'))];
+    const tsv = lines.join('\n');
+
+    // use clipboard API if available
+    try {
+      await navigator.clipboard.writeText(tsv);
+      alert('Tabela (TSV) copiada. Agora cole no Word (Ctrl+V). O Word irá transformar em tabela ajustável.');
+    } catch(err){
+      // fallback: select small textarea and execCommand
+      const ta = document.createElement('textarea');
+      ta.value = tsv;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      alert('Tabela copiada (método alternativo). Cole no Word (Ctrl+V).');
+    }
+  });
+
+  // -------- Download CSV (ponto-e-vírgula) ----------
+  downloadCSV.addEventListener('click', ()=>{
+    if(extractedRows.length === 0) return;
+    const header = ['Data','Hora','°C','%RH'];
+    // using ; as separator because in PT-BR Excel expects ;
+    const csvLines = [header.join(';'), ...extractedRows.map(r => r.join(';'))];
+    const csv = csvLines.join('\n');
+    const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'temperatura_umidade.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  // -------- Download .doc (HTML) ----------
+  downloadDoc.addEventListener('click', ()=>{
+    if(extractedRows.length === 0) return;
+    // Create a minimal HTML table (no CSS) so Word auto-adjusts columns
+    const rowsHtml = extractedRows.map(r => 
+      `<tr><td>${escapeHtml(r[0])}</td><td>${escapeHtml(r[1])}</td><td>${escapeHtml(r[2])}</td><td>${escapeHtml(r[3])}</td></tr>`
+    ).join('\n');
+
+    const docHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Temperatura e Umidade</title></head><body>
+<table border="1" cellspacing="0" cellpadding="4">
+<thead><tr><th>Data</th><th>Hora</th><th>°C</th><th>%RH</th></tr></thead>
+<tbody>
+${rowsHtml}
+</tbody>
+</table>
+</body></html>`;
+
+    const blob = new Blob([docHtml], {type: 'application/msword'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'temperatura_umidade.doc';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>
